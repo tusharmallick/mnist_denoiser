@@ -2,8 +2,12 @@
 
 Model: Dense 784 -> 64 (ReLU) -> 784 (sigmoid), trained on noisy (sigma=0.3) -> clean MNIST.
 """
+import io
 import os
+import urllib.request
+import zipfile
 
+import h5py
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -18,16 +22,50 @@ st.set_page_config(page_title="MNIST Autoencoder Denoiser", page_icon="🧹", la
 
 
 # ----------------------------------------------------------------------------- loaders
+class NumpyAutoencoder:
+    """Dense 784 -> 64 (ReLU) -> 784 (sigmoid), evaluated with plain NumPy.
+
+    Weights are read straight from the .keras archive (a zip holding model.weights.h5), so the app
+    does not depend on TensorFlow/Keras versions matching the ones used for training.
+    """
+
+    def __init__(self, path):
+        with zipfile.ZipFile(path) as z:
+            raw = z.read("model.weights.h5")
+        kernels, biases = [], []
+        with h5py.File(io.BytesIO(raw), "r") as f:
+            def visit(_, obj):
+                if isinstance(obj, h5py.Dataset):
+                    (kernels if obj.ndim == 2 else biases).append(np.array(obj[()], dtype="float32"))
+            f.visititems(visit)
+        # identify layers by shape (order in the HDF5 file is alphabetical, not layer order)
+        self.W1 = next(k for k in kernels if k.shape == (784, 64))
+        self.W2 = next(k for k in kernels if k.shape == (64, 784))
+        self.b1 = next(b for b in biases if b.shape == (64,))
+        self.b2 = next(b for b in biases if b.shape == (784,))
+
+    def predict(self, x, verbose=0):
+        h = np.maximum(x @ self.W1 + self.b1, 0.0)
+        return 1.0 / (1.0 + np.exp(-(h @ self.W2 + self.b2)))
+
+
 @st.cache_resource(show_spinner="Loading autoencoder…")
 def load_model():
-    import tensorflow as tf
-    return tf.keras.models.load_model(MODEL_PATH, compile=False)
+    return NumpyAutoencoder(MODEL_PATH)
+
+
+MNIST_URL = "https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz"
 
 
 @st.cache_data(show_spinner="Downloading MNIST test set (first run only)…")
 def load_mnist_test():
-    from tensorflow.keras.datasets import mnist
-    (_, _), (x_test, y_test) = mnist.load_data()
+    local = os.path.join(os.path.dirname(__file__), "mnist.npz")
+    if not os.path.exists(local):
+        local = os.path.join("/tmp", "mnist.npz")
+        if not os.path.exists(local):
+            urllib.request.urlretrieve(MNIST_URL, local)
+    with np.load(local) as d:
+        x_test, y_test = d["x_test"], d["y_test"]
     return x_test.reshape(-1, 784).astype("float32") / 255.0, y_test
 
 
